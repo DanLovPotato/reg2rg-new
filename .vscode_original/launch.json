@@ -1,0 +1,89 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "python": "/opt/conda/bin/python",
+            "env": {
+                "PYTHONPATH": "${env:HOME}/.local/lib/python3.10/site-packages"
+            }
+        },
+        {
+            "name": "Reg2RG: Inference (released weights)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/test_radgenome.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "python": "/opt/conda/bin/python",
+            "cwd": "${workspaceFolder}/src",
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "0",
+                "PYTHONPATH": "${env:HOME}/.local/lib/python3.10/site-packages"
+            },
+            "args": [
+                "--lang_encoder_path", "${workspaceFolder}/weights/llama_weights",
+                "--tokenizer_path", "${workspaceFolder}/weights/llama_weights",
+                "--pretrained_visual_encoder", "${workspaceFolder}/weights/Reg2RG_weights/RadFM_vit3d.pth",
+                "--pretrained_adapter", "${workspaceFolder}/weights/Reg2RG_weights/RadFM_perceiver_fc.pth",
+                "--ckpt_path", "${workspaceFolder}/weights/Reg2RG_weights/pytorch_model.bin",
+                "--data_folder", "${workspaceFolder}/../dataset/train_preprocessed",
+                "--mask_folder", "${workspaceFolder}/../dataset/train_region_mask",
+                "--report_file", "${workspaceFolder}/../dataset/radgenome_files/train_region_report.csv",
+                "--monai_cache_dir", "${workspaceFolder}/../dataset/cache",
+                "--result_path", "${workspaceFolder}/results/radgenome_first500_reports.csv"
+            ]
+        },
+        {
+            "name": "Python: train_radgenome.py (smoketest)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/train_radgenome.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "python": "/opt/conda/bin/python",
+            "cwd": "${workspaceFolder}/src",
+            "env": {
+                "PYTHONUNBUFFERED": "1",
+                "PYTHONFAULTHANDLER": "1",
+                "CUDA_VISIBLE_DEVICES": "0",
+                "PYTHONPATH": "${env:HOME}/.local/lib/python3.10/site-packages"
+            },
+            "args": [
+                "--bf16", "True",
+                "--lang_encoder_path", "${workspaceFolder}/weights/llama_weights",
+                "--tokenizer_path", "${workspaceFolder}/weights/llama_weights",
+                "--pretrained_visual_encoder", "${workspaceFolder}/weights/Reg2RG_weights/RadFM_vit3d.pth",
+                "--pretrained_adapter", "${workspaceFolder}/weights/Reg2RG_weights/RadFM_perceiver_fc.pth",
+                "--bank_npy_path", "${workspaceFolder}/../organ_annotations/organ_report_embeddings.npz",
+                "--organ_annotation_path", "${workspaceFolder}/../organ_annotations/organ_annotation.json",
+                "--data_folder", "${workspaceFolder}/../dataset/train_preprocessed",
+                "--mask_folder", "${workspaceFolder}/../dataset/train_region_mask",
+                "--report_file", "${workspaceFolder}/../dataset/radgenome_files/train_region_report.csv",
+                "--monai_cache_dir", "${workspaceFolder}/../dataset/cache",
+                "--output_dir", "${workspaceFolder}/results/Reg2RG_smoketest",
+                "--per_device_train_batch_size",
+                "1",
+                "--num_train_epochs", "200",
+                "--gradient_accumulation_steps", "1",
+                "--evaluation_strategy", "no",
+                "--save_strategy", "epoch",
+                "--save_total_limit", "1",
+                "--learning_rate", "1e-5",
+                "--max_grad_norm", "1.0",
+                "--weight_decay", "0.0",
+                "--warmup_steps", "0",
+                "--lr_scheduler_type", "constant_with_warmup",
+                "--dataloader_num_workers", "0",
+                "--run_name", "Reg2RG_smoketest",
+                "--logging_steps", "1",
+                "--logging_nan_inf_filter", "False"
+            ]
+        }
+    ]
+}
