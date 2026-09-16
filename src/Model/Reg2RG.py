@@ -1,3 +1,4 @@
+import functools
 from torch import nn
 from transformers.models.llama import LlamaForCausalLM
 from peft import get_peft_model, LoraConfig, TaskType
@@ -12,8 +13,13 @@ import torch.nn.functional as F
 import numpy as np    
 from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaTokenizer
  
+#---Dan---
 class Reg2RG(nn.Module):
-    def __init__(self, text_tokenizer_path, lang_model_path, pretrained_visual_encoder, pretrained_adapter,bank_npy_path,organ_annotation_path, max_region_size=10, max_img_size = 1, image_num = 32):
+    def __init__(self, text_tokenizer_path, lang_model_path, pretrained_visual_encoder,
+                 pretrained_adapter, bank_npy_path, organ_annotation_path,
+                 pretrained_finegrain_visual_encoder=None, max_region_size=10,
+                 max_img_size=1, image_num=32):
+#---Dan---
         super(Reg2RG, self).__init__()
         # tokenizer
         self.image_padding_tokens = []
@@ -72,7 +78,16 @@ class Reg2RG(nn.Module):
         self.lang_model = get_peft_model(self.lang_model, peft_config)
         self.lang_model.print_trainable_parameters()
  
+        # ---Dan---
+        # transformers==4.28.1's gradient_checkpointing_enable() takes no
+        # kwargs, so force non-reentrant checkpointing by patching the
+        # function modeling_llama.py calls at forward time.
+        torch.utils.checkpoint.checkpoint = functools.partial(
+            torch.utils.checkpoint.checkpoint, use_reentrant=False
+        )
         self.lang_model.gradient_checkpointing_enable()
+        # ---Dan---
+        
         self.lang_model.enable_input_require_grads()
         # self.lang_model.requires_grad_(False)
         # # frozen the lang model
@@ -81,6 +96,9 @@ class Reg2RG(nn.Module):
  
         self.embedding_layer = MyEmbedding(
             pretrained_visual_encoder=pretrained_visual_encoder,
+            #---Dan---
+            pretrained_finegrain_visual_encoder=pretrained_finegrain_visual_encoder,
+            #---Dan---
             pretrained_adapter=pretrained_adapter,
             bank_npy_path=bank_npy_path,
             organ_annotation_path=organ_annotation_path,
@@ -96,6 +114,7 @@ class Reg2RG(nn.Module):
         lang_x,
         vision_x,
         mask_x,
+        fvlm_mask_x,
         region2area,
         sample_ids,
         attention_mask,
@@ -112,6 +131,7 @@ class Reg2RG(nn.Module):
             embedding_output = self.embedding_layer(
                 vision_x,
                 mask_x,
+                fvlm_mask_x,
                 lang_x,
                 region2area,
                 sample_ids,
@@ -147,6 +167,7 @@ class Reg2RG(nn.Module):
         lang_x,
         vision_x,
         mask_x,
+        fvlm_mask_x,
         region2area,
         sample_ids=None,
         precomputed_region_embedding=None,
@@ -156,6 +177,7 @@ class Reg2RG(nn.Module):
             embedding_output = self.embedding_layer(
                 vision_x,
                 mask_x,
+                fvlm_mask_x,
                 lang_x,
                 region2area,
                 sample_ids,

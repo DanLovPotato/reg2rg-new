@@ -16,6 +16,9 @@ import tqdm
 import random
 import pickle
 import hashlib
+#---Dan---
+from Model.fvlm_vit.preprocess import FVLM_ORGAN_MASK_ID, center_crop_like_fvlm_eval
+#---Dan---
 
 REGIONS = [
     'abdomen',
@@ -33,7 +36,12 @@ REGIONS = [
 class RadGenomeDataset_Test(PersistentDataset):
     BLANK_VALUE = (-1024 + 400) / 600
 
-    def __init__(self, text_tokenizer, data_folder, mask_folder, csv_file, cache_dir, inferenced_id, max_region_size=10, max_img_size = 1, image_num = 32, region_num=33, max_seq=2048, resize_dim=500, voc_size=32000, force_num_frames=True):
+    #---Dan---
+    def __init__(self, text_tokenizer, data_folder, mask_folder, csv_file, cache_dir,
+                 inferenced_id, max_region_size=10, max_img_size=1, image_num=32,
+                 region_num=33, max_seq=2048, resize_dim=500, voc_size=32000,
+                 force_num_frames=True, use_fvlm=False, fvlm_processed_root=None):
+    #---Dan---
         self.inferenced_id = inferenced_id
         # text_tokenizer
         self.text_tokenizer = AutoTokenizer.from_pretrained(
@@ -79,6 +87,34 @@ class RadGenomeDataset_Test(PersistentDataset):
         self.max_seq = max_seq
         self.data_folder = data_folder
         self.mask_folder = mask_folder
+        #---Dan---
+        self.use_fvlm = use_fvlm
+        # Keep fVLM crop inputs on the canonical 9-label processed-mask convention
+        # used by fvlm/finetune.py and fvlm/eval_finetune.py.  This is deliberately
+        # independent of Reg2RG's raw CT / per-region-mask data_folder.
+        self.fvlm_processed_root = fvlm_processed_root
+        #---Dan---
+
+        #---Dan---
+        if self.use_fvlm:
+            # Do not infer this from data_folder: smoke datasets can contain a
+            # different 10-label merged-mask encoding (lung/pleura gets overwritten).
+            if not self.fvlm_processed_root:
+                raise ValueError(
+                    "fvlm_processed_root is required when use_fvlm=True; it must "
+                    "point to the canonical fVLM processed-data root with the "
+                    "9-label mask convention."
+                )
+            split = "train" if os.path.basename(data_folder).startswith("train") else "valid"
+            # Canonical root supplies the fVLM image and merged mask consumed below.
+            self.fvlm_image_folder = os.path.join(self.fvlm_processed_root, f"processed_{split}_images")
+            self.fvlm_mask_folder = os.path.join(self.fvlm_processed_root, f"processed_{split}_masks")
+            if not os.path.isdir(self.fvlm_image_folder) or not os.path.isdir(self.fvlm_mask_folder):
+                raise FileNotFoundError("fVLM processed image/mask folders are required for exact eval parity")
+            self.fvlm_loader = transforms.Compose([
+                transforms.LoadImaged(keys=["image", "label"], image_only=True, ensure_channel_first=True),
+            ])
+        #---Dan---
 
         self.accession_to_sentences = self.load_accession_sentences(csv_file)
         self.paths=[]
@@ -169,11 +205,22 @@ class RadGenomeDataset_Test(PersistentDataset):
         return len(self.samples)
 
     def mask_nii_img_to_tensor(self, img_path, mask_paths, region_transform, image_transform):
-        img_data = nib.load(img_path, mmap=True)
-        img_data = np.asarray(img_data.dataobj)
+        image_nii = nib.load(img_path, mmap=True)
+        img_data = np.asarray(image_nii.dataobj)
         img_data = torch.from_numpy(img_data).float()
+        #---Dan---
+        if self.use_fvlm:
+            file_name = os.path.basename(img_path)
+            fvlm_data = self.fvlm_loader({
+                "image": os.path.join(self.fvlm_image_folder, file_name),
+                "label": os.path.join(self.fvlm_mask_folder, file_name),
+            })
+            fvlm_image = fvlm_data["image"].as_tensor()
+            fvlm_mask = fvlm_data["label"].as_tensor()
+        #---Dan---
 
         mask_img_tensors = {}
+        fvlm_mask_tensors = {}
         flag = False
         masks = []
         mask_keys = []
@@ -205,7 +252,17 @@ class RadGenomeDataset_Test(PersistentDataset):
 
             tensor = tensor.unsqueeze(0) # shape: (1, 3, 256, 256, 64)
 
-            mask_img_tensors[key] = tensor
+            #---Dan---
+            if self.use_fvlm:
+                crop, crop_mask = center_crop_like_fvlm_eval(
+                    fvlm_image, fvlm_mask.eq(FVLM_ORGAN_MASK_ID[key]),
+                    return_mask=True, mask_value=FVLM_ORGAN_MASK_ID[key],
+                )
+                mask_img_tensors[key] = crop.unsqueeze(0)
+                fvlm_mask_tensors[key] = crop_mask.unsqueeze(0)
+            else:
+                mask_img_tensors[key] = tensor
+            #---Dan---
             flag = True
         if not flag:
             print('No mask: ', img_path)
@@ -230,7 +287,7 @@ class RadGenomeDataset_Test(PersistentDataset):
         for i, key in enumerate(mask_keys):
             mask_tensors[key] = masks_tensor[i].unsqueeze(0)
 
-        return mask_img_tensors, mask_tensors
+        return mask_img_tensors, mask_tensors, fvlm_mask_tensors
 
     def text_add_image_tokens(self, text):
         
@@ -248,7 +305,7 @@ class RadGenomeDataset_Test(PersistentDataset):
         return text
 
     def _build_branch(self, region_order, region_reports, mask_img_tensors,
-                      mask_tensors, dropped_regions, sample_id):
+                      mask_tensors, fvlm_mask_tensors, dropped_regions, sample_id):
         """Build one inference branch using the same inputs as training."""
         is_masked_branch = bool(dropped_regions)
         global_image = mask_img_tensors['image'].clone()
@@ -258,11 +315,13 @@ class RadGenomeDataset_Test(PersistentDataset):
 
         vision_x = {'image': global_image}
         branch_mask_x = {}
+        fvlm_mask_x = {}
         region2area = {index: area for index, area in enumerate(region_order)}
         if not is_masked_branch:
             for area in region_order:
                 vision_x[area] = mask_img_tensors[area]
                 branch_mask_x[area] = mask_tensors[area]
+                fvlm_mask_x[area] = fvlm_mask_tensors[area]
 
         instruction = ("Given the provided global and regional information from this CT scan, please generate a "
                        "comprehensive medical report for each region. First, identify the anatomical area "
@@ -288,6 +347,7 @@ class RadGenomeDataset_Test(PersistentDataset):
             'lang_x': text_input,
             'vision_x': vision_x,
             'mask_x': branch_mask_x,
+            'fvlm_mask_x': fvlm_mask_x,
             'region2area': region2area,
             'dropped_regions': sorted(dropped_regions),
             'is_masked_branch': is_masked_branch,
@@ -307,7 +367,7 @@ class RadGenomeDataset_Test(PersistentDataset):
             region_reports[key] = region_report
             mask_files[key] = mask_file
 
-        mask_img_tensors, mask_tensors = self.mask_img_to_tensor(img_file, mask_files)
+        mask_img_tensors, mask_tensors, fvlm_mask_tensors = self.mask_img_to_tensor(img_file, mask_files)
 
         #NOTE: remove useless regions from region_reports according to mask_img_tensors, only used to compute region prediction accuracy
         for key in list(region_reports.keys()):
@@ -330,11 +390,11 @@ class RadGenomeDataset_Test(PersistentDataset):
             dropped_regions = set(sample_rng.sample(region_order, num_to_drop))
 
         full_sample = self._build_branch(
-            region_order, region_reports, mask_img_tensors, mask_tensors,
+            region_order, region_reports, mask_img_tensors, mask_tensors, fvlm_mask_tensors,
             dropped_regions=set(), sample_id=sample_id,
         )
         mask_sample = self._build_branch(
-            region_order, region_reports, mask_img_tensors, mask_tensors,
+            region_order, region_reports, mask_img_tensors, mask_tensors, fvlm_mask_tensors,
             dropped_regions=dropped_regions, sample_id=sample_id,
         )
         return {

@@ -1,13 +1,16 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
+#---Dan---
+import os
+import sys
+#---Dan---
 from .helpers import PerceiverResampler
 from .utils import get_visual_encoder
 from einops import rearrange, repeat
 from einops_exts import rearrange_many
 import torchvision
 from .vit_3d import ViT
-from .fvlm_vit.vit import ViT as FvlmViT
 from einops.layers.torch import Rearrange
 from .transformer_decoder import TransformerDecoder, TransformerDecoderLayer
 from torch.utils.checkpoint import checkpoint
@@ -21,6 +24,7 @@ from .cross_modal_knowledge_enhancer import (
     RegionWiseLocalKnowledgeEnhancer,
     GlobalKnowledgeEnhancerWithKSAP,
 )
+from .fvlm_vit.organ_encoder import FVLMOrganEncoder
 import numpy as np
 import json
 CONDITIONS = [
@@ -56,15 +60,37 @@ FVLM_NATIVE_CROP_SIZE = (112, 256, 352)
 FVLM_PATCH_SIZE = (16, 16, 32)
 
 
-# def load_fvlm_visual_encoder(vit_module, checkpoint_path):
-#     """Loads the visual_encoder.* weights from a fvlm finetune.py checkpoint (which stores
-#     the whole BlipPretrain model's state_dict under "model") into a standalone fVLM ViT.
-#     """
-#     ckpt = torch.load(checkpoint_path, map_location='cpu')
-#     state_dict = ckpt['model'] if 'model' in ckpt else ckpt
-#     prefix = 'visual_encoder.'
-#     sub_state_dict = {k[len(prefix):]: v for k, v in state_dict.items() if k.startswith(prefix)}
-#     vit_module.load_state_dict(sub_state_dict, strict=True)
+#---Dan---
+def get_original_fvlm_vit():
+    """Return the exact ViT class imported by fvlm/eval_finetune.py."""
+    fvlm_root = os.environ.get(
+        "FVLM_SOURCE_ROOT", "/home/wisc/dxiang23/Projects/chestCT/code/fvlm"
+    )
+    if not os.path.isfile(os.path.join(fvlm_root, "lavis", "models", "blip_models", "vit.py")):
+        raise FileNotFoundError(
+            "fVLM source tree is required for exact encoder parity; set "
+            f"FVLM_SOURCE_ROOT. Looked in: {fvlm_root}"
+        )
+    if fvlm_root not in sys.path:
+        sys.path.insert(0, fvlm_root)
+    from lavis.models.blip_models.vit import ViT
+    return ViT
+
+
+def load_fvlm_visual_encoder(vit_module, checkpoint_path):
+    """Load only fVLM's visual encoder from its full BlipPretrain checkpoint."""
+    checkpoint_data = torch.load(checkpoint_path, map_location='cpu')
+    state_dict = checkpoint_data['model'] if 'model' in checkpoint_data else checkpoint_data
+    prefix = 'visual_encoder.'
+    visual_encoder_state = {
+        key[len(prefix):]: value
+        for key, value in state_dict.items()
+        if key.startswith(prefix)
+    }
+    if not visual_encoder_state:
+        raise KeyError(f"No {prefix!r} weights found in fVLM checkpoint: {checkpoint_path}")
+    vit_module.load_state_dict(visual_encoder_state, strict=True)
+#---Dan---
 
 
 REGIONS = [
@@ -108,20 +134,16 @@ class MyEmbedding(nn.Module):
             dropout=0.1,
             emb_dropout=0.1
         )
-        ############ finegrain_clip 用微调好的 fVLM 视觉编码器（对比学习预训练，见
-        # fvlm/finetune.py），而不是随机初始化的 vit_3d.ViT
-        # self.finegrain_clip_vision_encoder = FvlmViT(
-        #     in_channels=1,
-        #     img_size=FVLM_NATIVE_CROP_SIZE,
-        #     patch_size=FVLM_PATCH_SIZE,
-        #     hidden_size=vis_dim,
-        #     mlp_dim=3072,
-        #     num_layers=12,
-        #     num_heads=12,
-        #     qkv_bias=True,
-        #     dropout_rate=0.1,
-        # )
-        ##################
+        #---Dan---
+        self.use_fvlm = pretrained_finegrain_visual_encoder is not None
+        if self.use_fvlm:
+            self.finegrain_clip_vision_encoder = FVLMOrganEncoder(
+                get_original_fvlm_vit(), pretrained_finegrain_visual_encoder,
+            )
+            # Not an fVLM module: this is only the bridge from exact, 256-D
+            # fVLM feature space to the existing 4096-D Reg2RG token interface.
+            self.fvlm_to_llm = nn.Linear(256, embedding_dim)
+        #---Dan---
  
         self.mask_encoder = ViT(
             image_size=256,          # image size
@@ -141,20 +163,14 @@ class MyEmbedding(nn.Module):
         if pretrained_visual_encoder is not None:
             vit3d_ckpt = torch.load(pretrained_visual_encoder, map_location='cpu')
             self.vision_encoder.load_state_dict(vit3d_ckpt, strict=True)
-        #####
-        # load fine-tuned fVLM visual_encoder weights (extracted from the full BlipPretrain
-        # checkpoint saved by fvlm/finetune.py)
-        # if pretrained_finegrain_visual_encoder is not None:
-        #     load_fvlm_visual_encoder(self.finegrain_clip_vision_encoder, pretrained_finegrain_visual_encoder)
-        #     #####
- 
         # frozen the vision encoder
         for param in self.vision_encoder.parameters():
             param.requires_grad = False
-        ######    
-        # for param in self.finegrain_clip_vision_encoder.parameters():
-        #     param.requires_grad = False
-        ######
+        #---Dan---
+        if self.use_fvlm:
+            for param in self.finegrain_clip_vision_encoder.parameters():
+                param.requires_grad = False
+        #---Dan---
         self.vis_dim = vis_dim
  
         self.perceiver = PerceiverResampler(
@@ -227,6 +243,16 @@ class MyEmbedding(nn.Module):
                 raise ValueError("organ annotation must contain a train or validation list")
             self.organ_annotation_index = {record["id"]: record for record in annotation_records}
 
+    #---Dan---
+    def train(self, mode=True):
+        """Keep frozen visual backbones deterministic while adapters train."""
+        super().train(mode)
+        self.vision_encoder.eval()
+        if self.use_fvlm:
+            self.finegrain_clip_vision_encoder.eval()
+        return self
+    #---Dan---
+
 
     def _select_organ_annotations(self, sample_ids, region2areas):
         if self.organ_annotation_index is None:
@@ -288,6 +314,7 @@ class MyEmbedding(nn.Module):
         self,
         vision_x,
         mask_x,
+        fvlm_mask_x,
         text_input,
         region2areas,
         sample_ids=None,
@@ -306,16 +333,24 @@ class MyEmbedding(nn.Module):
             tokens and dropped organs use zero placeholders.
         """
         raw_image = vision_x['image']
+        # 
         B, S, C, H, W, D = raw_image.shape
 
         # Both prompts independently encode their own global CT volume.
+        # reshape维度
         vision_temp = rearrange(raw_image, "b S c h w d -> (b S) c h w d")
+        # 把上面整理好的 3D CT 数据真正送进 3D Vision Transformer (ViT) 编码器做特征提取
         vision_temp, _ = self.vision_encoder(vision_temp)
+        # 当时把 B 和 S 合并成一个维度送进 ViT；现在编码完了，就把这个合并维度重新拆成 B 和 S 两个独立维度，这样才能知道"哪几个 token 属于哪个病人的第几次扫描
         vision_temp = rearrange(vision_temp, "(b s) v d -> b s v d", b=B, s=S)
+        # Perceiver Resampler 把这些不定长的视觉特征压缩成固定数量（n 个）的紧凑 token，既降低了序列长度、又能适配 LLM 输入长度的要求
         vision_temp = self.perceiver(vision_temp.unsqueeze(2))
+        # latent token 数量 = 32， 32 就是"每次扫描固定压缩成 32 个 token
         n = vision_temp.shape[2]
+        # 
         vision_temp = rearrange(vision_temp, "b s n d -> (b s n) d")
         vision_temp = rearrange(vision_temp, "(b T) d -> b T d", b=B, T=n * S)
+        # Global features(最上面那个分支)
         image_embedding = self.fc(vision_temp)
 
         if precomputed_region_embedding is not None:
@@ -324,6 +359,8 @@ class MyEmbedding(nn.Module):
                 raise ValueError("Mask branch vision_x must contain only the global image")
             if mask_x:
                 raise ValueError("Mask branch mask_x must be empty")
+            if fvlm_mask_x:
+                raise ValueError("Mask branch fvlm_mask_x must be empty")
             if precomputed_region_embedding.size(0) != B:
                 raise ValueError("Precomputed region embedding batch size does not match image batch")
             if precomputed_region_embedding.size(-1) != self.embedding_dim:
@@ -341,27 +378,60 @@ class MyEmbedding(nn.Module):
             missing_masks = set(region_embeddings) - set(mask_x)
             if missing_masks:
                 raise KeyError(f"Missing organ masks for: {sorted(missing_masks)}")
+            missing_fvlm_masks = set(region_embeddings) - set(fvlm_mask_x)
+            if missing_fvlm_masks:
+                raise KeyError(f"Missing fVLM crop masks for: {sorted(missing_fvlm_masks)}")
 
             mask_embeddings = {}
             for area, region_tensor in region_embeddings.items():
                 vision_temp = rearrange(
                     region_tensor, "b S c h w d -> (b S) c h w d"
                 )
-                assert vision_temp.shape[1] == 3, (
-                    f"RadFM vision encoder expects 3 channels, got {vision_temp.shape[1]} "
-                    f"for region {area!r} with shape {tuple(vision_temp.shape)}"
+                #---Dan---
+                # This is the original fine-grained region-encoder location.
+                # It always uses fVLM, never the RadFM global-image encoder.
+                if not self.use_fvlm:
+                    raise RuntimeError(
+                        "pretrained_finegrained_visual_encoder is required for "
+                        "Reg2RG region encoding"
+                    )
+                #---Dan---
+                # center_crop_like_fvlm_eval grows the crop past FVLM_NATIVE_CROP_SIZE
+                # (matching fvlm/eval_finetune.py's own center_crop) whenever an organ's
+                # mask bounding box exceeds it, then pads only up to the next multiple of
+                # FVLM_PATCH_SIZE - so crops are >= native size, divisible by patch size,
+                # but not always exactly native size. PatchEmbeddingBlock interpolates its
+                # position-embedding table to whatever (D, H, W) actually comes in.
+                crop_dims = vision_temp.shape[2:]
+                shape_ok = (
+                    vision_temp.shape[1] == 1
+                    and len(crop_dims) == len(FVLM_NATIVE_CROP_SIZE)
+                    and all(d >= n for d, n in zip(crop_dims, FVLM_NATIVE_CROP_SIZE))
+                    and all(d % p == 0 for d, p in zip(crop_dims, FVLM_PATCH_SIZE))
                 )
-                vision_temp, _ = self.vision_encoder(vision_temp)
-                vision_temp = rearrange(
-                    vision_temp, "(b s) v d -> b s v d", b=B, s=S
+                if not shape_ok:
+                    raise ValueError(
+                        f"fVLM expects (1, D, H, W) crops with D,H,W >= "
+                        f"{FVLM_NATIVE_CROP_SIZE} and divisible by {FVLM_PATCH_SIZE}, "
+                        f"got {tuple(vision_temp.shape[1:])} for {area!r}"
+                    )
+                #---Dan---
+                fvlm_mask = rearrange(
+                    fvlm_mask_x[area], "b S c h w d -> (b S) c h w d"
                 )
-                vision_temp = self.perceiver(vision_temp.unsqueeze(2))
-                region_n = vision_temp.shape[2]
-                vision_temp = rearrange(vision_temp, "b s n d -> (b s n) d")
-                vision_temp = rearrange(
-                    vision_temp, "(b T) d -> b T d", b=B, T=region_n * S
+                # This 256-D feature is exactly fVLM's image branch output:
+                # ViT -> multi-scale masked query attention -> organ projection
+                # -> L2 normalization.  Only the adapter afterwards is Reg2RG-specific.
+                fvlm_feature = self.finegrain_clip_vision_encoder(
+                    vision_temp, fvlm_mask, area,
                 )
-                region_embeddings[area] = self.fc(vision_temp)
+                region_embeddings[area] = self.fvlm_to_llm(fvlm_feature)
+                region_embeddings[area] = rearrange(
+                    region_embeddings[area], "(b s) d -> b s 1 d", b=B, s=S
+                ).expand(-1, -1, self.region_token_len - 1, -1)
+                region_embeddings[area] = rearrange(
+                    region_embeddings[area], "b s n d -> b (s n) d"
+                )
 
                 mask_embedding, _ = self.mask_encoder(mask_x[area])
                 mask_embedding = torch.mean(mask_embedding, dim=1)

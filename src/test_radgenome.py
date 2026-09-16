@@ -48,6 +48,7 @@ class DataCollator(object):
         lang_xs = [instance['lang_x'] for instance in instances]
         vision_xs = [instance['vision_x'] for instance in instances]
         mask_xs = [instance['mask_x'] for instance in instances]
+        fvlm_mask_xs = [instance['fvlm_mask_x'] for instance in instances]
         images = torch.cat(
             [vision['image'].unsqueeze(0) for vision in vision_xs], dim=0
         )
@@ -55,14 +56,17 @@ class DataCollator(object):
         if is_masked_branch:
             collated_vision_xs = {'image': images}
             collated_mask_xs = {}
+            collated_fvlm_mask_xs = {}
         else:
             vision_temp = {area: [] for area in REGIONS}
             mask_temp = {area: [] for area in REGIONS}
+            fvlm_mask_temp = {area: [] for area in REGIONS}
             vision_shape = next(
                 tensor.shape for area, tensor in vision_xs[0].items()
                 if area != 'image'
             )
             mask_shape = next(iter(mask_xs[0].values())).shape
+            fvlm_mask_shape = next(iter(fvlm_mask_xs[0].values())).shape
             useless_regions = []
 
             for area in REGIONS:
@@ -71,16 +75,19 @@ class DataCollator(object):
                     if area in vision_xs[sample_index]:
                         vision_temp[area].append(vision_xs[sample_index][area])
                         mask_temp[area].append(mask_xs[sample_index][area])
+                        fvlm_mask_temp[area].append(fvlm_mask_xs[sample_index][area])
                         area_is_present = True
                     else:
                         vision_temp[area].append(torch.zeros(vision_shape))
                         mask_temp[area].append(torch.zeros(mask_shape))
+                        fvlm_mask_temp[area].append(torch.zeros(fvlm_mask_shape))
                 if not area_is_present:
                     useless_regions.append(area)
 
             for area in useless_regions:
                 vision_temp.pop(area)
                 mask_temp.pop(area)
+                fvlm_mask_temp.pop(area)
             useful_regions = list(vision_temp.keys())
             collated_vision_xs = {
                 area: torch.cat(
@@ -95,6 +102,10 @@ class DataCollator(object):
                 )
                 for area in useful_regions
             }
+            collated_fvlm_mask_xs = {
+                area: torch.cat([tensor.unsqueeze(0) for tensor in fvlm_mask_temp[area]], dim=0)
+                for area in useful_regions
+            }
 
         return {
             'sample_ids': [instance['sample_id'] for instance in instances],
@@ -103,6 +114,7 @@ class DataCollator(object):
             ),
             'vision_x': collated_vision_xs,
             'mask_x': collated_mask_xs,
+            'fvlm_mask_x': collated_fvlm_mask_xs,
             'region2area': [instance['region2area'] for instance in instances],
             'dropped_regions': [instance['dropped_regions'] for instance in instances],
             'question': [instance['question'] for instance in instances],
@@ -169,7 +181,12 @@ def main():
         mask_folder=data_args.mask_folder,
         csv_file=data_args.report_file,
         cache_dir=data_args.monai_cache_dir,
-        inferenced_id = inferenced_id
+        inferenced_id=inferenced_id,
+        #---Dan---
+        use_fvlm=model_args.pretrained_finegrained_visual_encoder is not None,
+        # Canonical fVLM processed data; do not derive it from Reg2RG's raw-data root.
+        fvlm_processed_root=data_args.fvlm_processed_root,
+        #---Dan---
     )
 
     Test_dataloader = DataLoader(
@@ -190,6 +207,9 @@ def main():
         text_tokenizer_path=model_args.tokenizer_path,
         lang_model_path=model_args.lang_encoder_path,
         pretrained_visual_encoder=model_args.pretrained_visual_encoder,
+        #---Dan---
+        pretrained_finegrain_visual_encoder=model_args.pretrained_finegrained_visual_encoder,
+        #---Dan---
         pretrained_adapter=model_args.pretrained_adapter,
         bank_npy_path=data_args.bank_npy_path,
         organ_annotation_path=data_args.organ_annotation_path,
@@ -212,6 +232,7 @@ def main():
             full['lang_x'].cuda(),
             {area: tensor.cuda() for area, tensor in full['vision_x'].items()},
             {area: tensor.cuda() for area, tensor in full['mask_x'].items()},
+            {area: tensor.cuda() for area, tensor in full['fvlm_mask_x'].items()},
             full['region2area'],
             sample_ids=full['sample_ids'],
             return_rwlke_region_embedding=True,
@@ -235,6 +256,7 @@ def main():
         mask_reports = model.generate(
             mask['lang_x'].cuda(),
             {area: tensor.cuda() for area, tensor in mask['vision_x'].items()},
+            {},
             {},
             mask['region2area'],
             sample_ids=mask['sample_ids'],

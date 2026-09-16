@@ -26,6 +26,7 @@ CUDA_VISIBLE_DEVICES=$cuda_devices torchrun --nproc_per_node=$nproc_per_node --m
     --tokenizer_path "$tokenizer_path" \
     --pretrained_visual_encoder "$pretrained_visual_encoder" \
     --pretrained_finegrained_visual_encoder "$pretrained_finegrained_visual_encoder" \
+    --fvlm_processed_root "$fvlm_processed_root" \
     --pretrained_adapter "$pretrained_adapter" \
     --data_folder "$data_folder" \
     --mask_folder "$mask_folder" \

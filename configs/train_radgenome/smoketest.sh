@@ -22,8 +22,11 @@ remote_base="/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT"
 lang_encoder_path="$remote_base/weights/llama_weights"
 tokenizer_path="$remote_base/weights/llama_weights"
 pretrained_visual_encoder="$remote_base/weights/Reg2RG_weights/RadFM_vit3d.pth"
-pretrained_finegrained_visual_encoder="$remote_base/weights/fvlm_weights/finetuned/checkpoint_040.pth"
+pretrained_finegrained_visual_encoder="$remote_base/weights/fvlm_weights/finetuned_9_8/checkpoint_040.pth"
 pretrained_adapter="$remote_base/weights/Reg2RG_weights/RadFM_perceiver_fc.pth"
+# Canonical fVLM processed-data root (processed_{train,valid}_{images,masks}) - required
+# whenever pretrained_finegrained_visual_encoder is set; see radgenome_dataset_train.py.
+fvlm_processed_root="$remote_base/data/dataset"
 
 # data_folder="$remote_base/data/smoke_CTimagedata/reg2rg_data/dataset/train_preprocessed"
 # mask_folder="$remote_base/data/smoke_CTimagedata/reg2rg_data/dataset/train_region_mask"
@@ -34,16 +37,16 @@ mask_folder="$remote_base/data/dataset/train_region_mask"
 report_file="$remote_base/data/dataset/radgenome_files/train_region_report.csv"
 monai_cache_dir="$remote_base/data/dataset/cache"
 
-organ_annotation_path="$remote_base/data/dataset/EK_files/organ_annotation.json"
-bank_npy_path="$remote_base/data/dataset/EK_files/organ_report_embeddings.npz"
+organ_annotation_path="$remote_base/data/dataset/EK_files_train/organ_annotation.json"
+bank_npy_path="$remote_base/data/dataset/EK_files_train/organ_report_embeddings.npz"
 output_dir="$remote_base/outputs/$experiment_name"
-deepspeed_config="../ds_configs/stage1.json"
+deepspeed_config="../ds_configs/stage2.json"
 
 # Training settings — kept minimal for a fast smoke test, not a real training run
 learning_rate=5e-5
 per_device_train_batch_size=1
 num_train_epochs=20
-gradient_accumulation_steps=6 # 8的倍数
+gradient_accumulation_steps=8 # 8的倍数
 evaluation_strategy="no"
 save_strategy="epoch"
 save_total_limit=1

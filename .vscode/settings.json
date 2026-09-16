@@ -1,3 +1,5 @@
 {
-  "python.defaultInterpreterPath": "${workspaceFolder}/.conda/envs/reg2rg-py39/bin/python"
+    "python.defaultInterpreterPath": "/mnt/local/data/dxiang23/conda/envs/reg2rg/bin/python",
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda"
 }
