@@ -17,12 +17,12 @@ from transformers import AutoTokenizer, AutoModel
 from monai.networks.nets.swin_unetr import SwinTransformer
 from .cross_attention import TwoWayTransformer
 from .cross_modal_knowledge_enhancer import (
-    CrossModalKnowledgeEnhancer,
     RegionWiseLocalKnowledgeEnhancer,
     GlobalKnowledgeEnhancerWithKSAP,
 )
 import numpy as np
 import json
+import warnings
 CONDITIONS = [
     'enlarged cardiomediastinum',
     'cardiomegaly',
@@ -201,14 +201,12 @@ class MyEmbedding(nn.Module):
                 raise ValueError(f"report bank must be 2-D or 3-D, got shape {bank_array.shape}")
             self.register_buffer("report_bank", torch.from_numpy(bank_array).float(), persistent=False)
             bank_dim = bank_array.shape[-1]
-            self.gke = CrossModalKnowledgeEnhancer(d_model=embedding_dim, bank_dim=bank_dim)
             self.rwlke = RegionWiseLocalKnowledgeEnhancer(organs_list=REGIONS, d_model=embedding_dim, bank_dim=bank_dim)
             self.global_gke = GlobalKnowledgeEnhancerWithKSAP(
                 organs_list=REGIONS, d_model=embedding_dim
             )
         else:
             self.register_buffer("report_bank", None, persistent=False)
-            self.gke = None
             self.rwlke = None
             self.global_gke = None
 
@@ -227,6 +225,25 @@ class MyEmbedding(nn.Module):
                 raise ValueError("organ annotation must contain a train or validation list")
             self.organ_annotation_index = {record["id"]: record for record in annotation_records}
 
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # Only the removed whole-image report-attention module is obsolete.
+        # Keep strict checking for RWLKE, LIFT-GCN and every other parameter.
+        obsolete = [key for key in state_dict if key.startswith(prefix + "gke.")]
+        if obsolete:
+            warnings.warn(
+                f"Ignoring {len(obsolete)} legacy {prefix}gke.* checkpoint tensors: "
+                "whole-image report attention was removed; image tokens now receive "
+                "only the additive LIFT-GCN context.",
+                UserWarning,
+            )
+            for key in obsolete:
+                state_dict.pop(key)
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs,
+        )
 
     def _select_organ_annotations(self, sample_ids, region2areas):
         if self.organ_annotation_index is None:
@@ -297,8 +314,10 @@ class MyEmbedding(nn.Module):
         """Build the two visual streams used by the Full and Mask prompts.
 
         Full branch:
-            full global CT -> encoder/adapter -> global report attention -> LIFT-GCN
-            organ crops/masks -> encoder/adapter -> RWLKE region tokens
+            full global CT -> encoder/adapter -> image tokens
+            organ crops/masks -> encoder/adapter -> RWLKE -> LIFT-GCN context
+            image tokens + broadcast graph context -> Full image tokens
+            RWLKE region tokens are retained separately, without graph context.
 
         Mask branch:
             masked global CT -> encoder/adapter only
@@ -406,10 +425,8 @@ class MyEmbedding(nn.Module):
                     organ_report_vectors,
                 )
 
-                # Global stream: report attention followed by LIFT-GCN.
-                enhanced_image_embedding = self.gke(
-                    image_embedding, organ_report_vectors
-                )
+                # Graph context comes only from the RWLKE organ stream.
+                # Full-image tokens do not attend to report-bank vectors.
                 local_features = {}
                 for organ in REGIONS:
                     sample_features = []
@@ -445,7 +462,7 @@ class MyEmbedding(nn.Module):
 
                 graph_global, _ = self.global_gke(local_features)
                 enhanced_image_embedding = (
-                    enhanced_image_embedding + graph_global.unsqueeze(1)
+                    image_embedding + graph_global.unsqueeze(1)
                 )
             else:
                 enhanced_image_embedding = image_embedding
