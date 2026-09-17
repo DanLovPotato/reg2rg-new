@@ -11,6 +11,9 @@ import tqdm
 
 from torch.utils.data import Dataset
 import monai.transforms as transforms
+#---Dan---
+from Model.fvlm_vit.preprocess import FVLM_ORGAN_MASK_ID, center_crop_like_fvlm_eval
+#---Dan---
 
 REGIONS = [
     'abdomen',
@@ -42,8 +45,11 @@ class RadGenomeDataset_Train(Dataset):
     # 归一化后的“空气值”，和 mask_nii_img_to_tensor 里 (-1024 -> (x+400)/600) 的换算保持一致
     BLANK_VALUE = (-1024 + 400) / 600
 
+    #---Dan---
     def __init__(self, text_tokenizer, image_padding_tokens, region_padding_tokens,
-                 data_folder, mask_folder, csv_file, cache_dir=None, max_seq=2048, voc_size=32000):
+                 data_folder, mask_folder, csv_file, cache_dir=None, max_seq=2048,
+                 voc_size=32000, use_fvlm=False, fvlm_processed_root=None):
+    #---Dan---
         self.tokenizer = text_tokenizer
         self.image_padding_tokens = image_padding_tokens
         self.region_padding_tokens = region_padding_tokens
@@ -51,6 +57,34 @@ class RadGenomeDataset_Train(Dataset):
         self.mask_folder = mask_folder
         self.max_seq = max_seq
         self.voc_size = voc_size
+        #---Dan---
+        self.use_fvlm = use_fvlm
+        # Keep fVLM crop inputs on the canonical 9-label processed-mask convention
+        # used by fvlm/finetune.py and fvlm/eval_finetune.py.  This is deliberately
+        # independent of Reg2RG's raw CT / per-region-mask data_folder.
+        self.fvlm_processed_root = fvlm_processed_root
+        #---Dan---
+
+        #---Dan---
+        if self.use_fvlm:
+            # Do not infer this from data_folder: smoke datasets can contain a
+            # different 10-label merged-mask encoding (lung/pleura gets overwritten).
+            if not self.fvlm_processed_root:
+                raise ValueError(
+                    "fvlm_processed_root is required when use_fvlm=True; it must "
+                    "point to the canonical fVLM processed-data root with the "
+                    "9-label mask convention."
+                )
+            split = "train" if os.path.basename(data_folder).startswith("train") else "valid"
+            # Canonical root supplies the fVLM image and merged mask consumed below.
+            self.fvlm_image_folder = os.path.join(self.fvlm_processed_root, f"processed_{split}_images")
+            self.fvlm_mask_folder = os.path.join(self.fvlm_processed_root, f"processed_{split}_masks")
+            if not os.path.isdir(self.fvlm_image_folder) or not os.path.isdir(self.fvlm_mask_folder):
+                raise FileNotFoundError("fVLM processed image/mask folders are required for exact eval parity")
+            self.fvlm_loader = transforms.Compose([
+                transforms.LoadImaged(keys=["image", "label"], image_only=True, ensure_channel_first=True),
+            ])
+        #---Dan---
 
         self.accession_to_sentences = self.load_accession_sentences(csv_file)
         self.samples = self.prepare_samples()
@@ -136,8 +170,19 @@ class RadGenomeDataset_Train(Dataset):
 
     def mask_nii_img_to_tensor(self, img_path, mask_paths):
         img_data = nib.load(img_path).get_fdata()
+        #---Dan---
+        if self.use_fvlm:
+            file_name = os.path.basename(img_path)
+            fvlm_data = self.fvlm_loader({
+                "image": os.path.join(self.fvlm_image_folder, file_name),
+                "label": os.path.join(self.fvlm_mask_folder, file_name),
+            })
+            fvlm_image = fvlm_data["image"].as_tensor()
+            fvlm_mask = fvlm_data["label"].as_tensor()
+        #---Dan---
 
         mask_img_tensors = {}
+        fvlm_mask_tensors = {}
         flag = False
         masks = []
         mask_keys = []
@@ -161,7 +206,17 @@ class RadGenomeDataset_Train(Dataset):
             tensor = tensor.repeat(3, 1, 1, 1)
             tensor = tensor.unsqueeze(0)  # shape: (1, 3, 256, 256, 64)
 
-            mask_img_tensors[key] = tensor
+            #---Dan---
+            if self.use_fvlm:
+                crop, crop_mask = center_crop_like_fvlm_eval(
+                    fvlm_image, fvlm_mask.eq(FVLM_ORGAN_MASK_ID[key]),
+                    return_mask=True, mask_value=FVLM_ORGAN_MASK_ID[key],
+                )
+                mask_img_tensors[key] = crop.unsqueeze(0)
+                fvlm_mask_tensors[key] = crop_mask.unsqueeze(0)
+            else:
+                mask_img_tensors[key] = tensor
+            #---Dan---
             flag = True
 
         if not flag:
@@ -183,7 +238,7 @@ class RadGenomeDataset_Train(Dataset):
         for i, key in enumerate(mask_keys):
             mask_tensors[key] = masks_tensor[i].unsqueeze(0)
 
-        return mask_img_tensors, mask_tensors
+        return mask_img_tensors, mask_tensors, fvlm_mask_tensors
 
     def text_add_image_tokens(self, text):
         text = '<image>' + self.image_padding_tokens[0] + '</image>' + '. ' + text
@@ -197,7 +252,7 @@ class RadGenomeDataset_Train(Dataset):
         text = region_text + text
         return text
 
-    def _build_branch(self, region_order, region_reports, mask_img_tensors, mask_tensors, dropped_regions, sample_id):
+    def _build_branch(self, region_order, region_reports, mask_img_tensors, mask_tensors, fvlm_mask_tensors, dropped_regions, sample_id):
         """
         构建单条分支样本：
         - Full 分支：完整全局 CT、全部 organ crops/masks、完整 region prompt。
@@ -215,6 +270,7 @@ class RadGenomeDataset_Train(Dataset):
 
         vision_x = {'image': global_image}
         mask_x = {}
+        fvlm_mask_x = {}
         region2area = {}
         for i, area in enumerate(region_order):
             region2area[i] = area
@@ -222,6 +278,7 @@ class RadGenomeDataset_Train(Dataset):
                 # 只有 Full 分支提供 organ crop 和解剖 mask，供局部编码与 RWLKE 使用。
                 vision_x[area] = mask_img_tensors[area]
                 mask_x[area] = mask_tensors[area]
+                fvlm_mask_x[area] = fvlm_mask_tensors[area]
 
         # 2. 构造 Prompt（占位符不透露区域名字，需要模型自己识别）
         instruction = ("Given the provided global and regional information from this CT scan, please generate a "
@@ -266,6 +323,7 @@ class RadGenomeDataset_Train(Dataset):
             "lang_x": text_input,
             'vision_x': vision_x,
             'mask_x': mask_x,
+            'fvlm_mask_x': fvlm_mask_x,
             'region2area': region2area,
             'dropped_regions': list(dropped_regions),
             'is_masked_branch': is_masked_branch,
@@ -287,7 +345,7 @@ class RadGenomeDataset_Train(Dataset):
             region_reports[key] = region_report
             mask_files[key] = mask_file
 
-        mask_img_tensors, mask_tensors = self.mask_nii_img_to_tensor(img_file, mask_files)
+        mask_img_tensors, mask_tensors, fvlm_mask_tensors = self.mask_nii_img_to_tensor(img_file, mask_files)
 
         # NOTE: 按实际生成出 tensor 的区域为准（个别 mask 可能是空的，被 mask_nii_img_to_tensor 跳过）
         for key in list(region_reports.keys()):
@@ -298,7 +356,7 @@ class RadGenomeDataset_Train(Dataset):
         random.shuffle(region_order)  # 对应架构图里的 "Shuffle & Replace"
 
         # Full 分支：不挖空任何区域
-        full_sample = self._build_branch(region_order, region_reports, mask_img_tensors, mask_tensors,
+        full_sample = self._build_branch(region_order, region_reports, mask_img_tensors, mask_tensors, fvlm_mask_tensors,
                                           dropped_regions=set(), sample_id=sample_id)
 
         # Mask 分支：随机挑选 30%~50% 的有效区域挖空
@@ -306,7 +364,7 @@ class RadGenomeDataset_Train(Dataset):
         if region_order:
             num_to_drop = max(1, int(len(region_order) * random.uniform(0.3, 0.5)))
             dropped_regions = set(random.sample(region_order, num_to_drop))
-        mask_sample = self._build_branch(region_order, region_reports, mask_img_tensors, mask_tensors,
+        mask_sample = self._build_branch(region_order, region_reports, mask_img_tensors, mask_tensors, fvlm_mask_tensors,
                                           dropped_regions=dropped_regions, sample_id=sample_id)
 
         return {

@@ -1,6 +1,7 @@
 {
     "version": "0.2.0",
     "configurations": [
+    
         {
             "name": "Python: Current File",
             "type": "debugpy",
@@ -30,7 +31,7 @@
             "python": "/mnt/local/data/dxiang23/conda/envs/reg2rg/bin/python",
             "cwd": "${workspaceFolder}/scripts",
             "env": {
-                "CUDA_VISIBLE_DEVICES": "1",
+                "CUDA_VISIBLE_DEVICES": "3",
                 "RANK": "0",
                 "LOCAL_RANK": "0",
                 "WORLD_SIZE": "1",
@@ -42,18 +43,20 @@
                 "--lang_encoder_path", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/weights/llama_weights",
                 "--tokenizer_path", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/weights/llama_weights",
                 "--pretrained_visual_encoder", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/weights/Reg2RG_weights/RadFM_vit3d.pth",
-                "--pretrained_finegrained_visual_encoder", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/weights/fvlm_weights/finetuned/checkpoint_040.pth",
+                "--pretrained_finegrained_visual_encoder", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/weights/fvlm_weights/finetuned_9_8/checkpoint_040.pth",
                 "--pretrained_adapter", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/weights/Reg2RG_weights/RadFM_perceiver_fc.pth",
-                "--data_folder", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/data/smoke_CTimagedata/reg2rg_data/dataset/train_preprocessed",
-                "--mask_folder", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/data/smoke_CTimagedata/reg2rg_data/dataset/train_region_mask",
-                "--report_file", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/data/smoke_CTimagedata/reg2rg_data/dataset/radgenome_files/train_region_report.csv",
+                "--data_folder", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/data/smoke_CTimagedata/reg2rg_data/dataset/valid_preprocessed",
+                "--mask_folder", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/data/smoke_CTimagedata/reg2rg_data/dataset/valid_region_mask",
+                // fVLM eval-compatible root: canonical 9-label processed masks, not smoke's 10-label masks.
+                "--fvlm_processed_root", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/data/dataset",
+                "--report_file", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/data/smoke_CTimagedata/reg2rg_data/dataset/radgenome_files/validation_region_report.csv",
                 "--monai_cache_dir", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/data/smoke_CTimagedata/reg2rg_data/cache",
-                "--organ_annotation_path", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/data/dataset/EK_files/organ_annotation.json",
-                "--bank_npy_path", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/data/dataset/EK_files/organ_report_embeddings.npz",
+                "--bank_npy_path", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/data/dataset/EK_files_train/organ_report_embeddings.npz",
+                "--organ_annotation_path", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/data/dataset/EK_files_train/organ_annotation.json",
                 "--output_dir", "/mnt/researchdrive/ptiwari9/Staff_Trainee_Folders/Dan/chestCT/outputs/Reg2RG_smoketest_debug",
                 "--deepspeed", "${workspaceFolder}/ds_configs/stage2.json",
                 "--per_device_train_batch_size", "1",
-                "--num_train_epochs", "10",
+                "--num_train_epochs", "200",
                 "--gradient_accumulation_steps", "1",
                 "--evaluation_strategy", "no",
                 "--save_strategy", "epoch",
