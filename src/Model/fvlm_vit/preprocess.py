@@ -76,3 +76,120 @@ def center_crop_like_fvlm_eval(
     )
     return image, cropped_mask * mask_value
 #---Dan---
+
+
+#---Dan---
+# ── 在线复现 fvlm/preprocess.py 的离线流水线 ──────────────────────────────
+# 让训练/推理只依赖 RadGenome 的原始数据（{split}_preprocessed + {split}_region_mask），
+# 不再需要事先跑一遍 fvlm/preprocess.py 生成 processed_{split}_{images,masks}。
+# 下面的常量和步骤顺序必须和 fvlm/preprocess.py 逐条对齐，否则冻结的 fVLM 编码器
+# 会看到与其微调时不同的输入分布。
+
+# fvlm/preprocess.py::ORGANS —— 只有 9 个，没有 pleura。RadGenome 的 pleura.nii.gz
+# 与 lung.nii.gz 逐体素相同，单通道整数 mask 无法同时编码两者，所以 pleura 不写入
+# 自己的 id，改由 FVLM_ORGAN_MASK_ID 指回 lung 的 6。
+FVLM_MASK_SOURCE_ORGANS = [
+    "abdomen", "bone", "breast", "esophagus", "heart",
+    "lung", "mediastinum", "thyroid", "trachea and bronchie",
+]
+
+# fvlm_original/data/resize.py 的 ref_spacing。CROP_SIZE 的深度轴（112 体素）只有在
+# 重采样到 3mm 层厚之后才对应预训练窗口假设的 ~336mm 解剖范围。
+REF_SPACING = (1.0, 1.0, 3.0)
+
+# fvlm/preprocess.py 在器官并集 bbox 外扩的边距
+EXTEND_D = 5
+EXTEND_HW = 20
+
+
+def merge_organ_masks(mask_paths, loader):
+    """把每器官一个的二值 {organ}.nii.gz 合成单通道多类别体积（0=背景，1..9=器官）。
+
+    id = FVLM_MASK_SOURCE_ORGANS.index(organ) + 1，与 fvlm/preprocess.py 一致。
+    重叠处后写覆盖先写，循环顺序因此不能改。
+    """
+    merged = None
+    for organ_id, organ in enumerate(FVLM_MASK_SOURCE_ORGANS):
+        path = mask_paths.get(organ)
+        if path is None:
+            continue
+        organ_mask = loader({"label": path})["label"]
+        if merged is None:
+            # 从真实加载的 mask 克隆而非 zeros，保留 affine/spacing 元数据供重采样使用
+            merged = organ_mask.clone()
+            merged[:] = 0
+        merged[organ_mask > 0] = organ_id + 1
+    return merged
+
+
+def build_fvlm_volume(image_path, mask_paths, image_loader, mask_loader):
+    """在线生成 fVLM 分支所需的 (image, label)，等价于 fvlm/preprocess.py 的产物。
+
+    Args:
+        image_path: RadGenome 原始 CT 的 .nii.gz 路径
+        mask_paths: {organ_name: {organ}.nii.gz 路径}，至少覆盖 FVLM_MASK_SOURCE_ORGANS
+        image_loader / mask_loader: MONAI LoadImaged(ensure_channel_first=True)
+
+    Returns:
+        (image, label)，形状 [1, D, H, W]，D/H/W 各自 >= CROP_SIZE。
+        image 已做 [-1150, 350] → [0, 1] 的强度窗；label 是 1..9 的整数器官编号。
+    """
+    from monai import transforms
+
+    label = merge_organ_masks(mask_paths, mask_loader)
+    if label is None:
+        raise FileNotFoundError(f"没有任何器官 mask 可用于合并: {image_path}")
+
+    data = image_loader({"image": image_path})
+    image = data["image"]
+    label.meta["filename_or_obj"] = image_path
+    data["label"] = label
+
+    # ① 先在原始轴序下重采样到 REF_SPACING（image/label 共用同一网格，目标尺寸相同）
+    affine = image.meta["affine"]
+    spacing = tuple(abs(affine[i, i].item()) for i in range(3))
+    _, x, y, z = image.shape
+    scale = [spacing[i] / REF_SPACING[i] for i in range(3)]
+    target_size = [int(x * scale[0]), int(y * scale[1]), int(z * scale[2])]
+    data = transforms.Compose([
+        transforms.Resized(keys=["image"], spatial_size=target_size, mode="trilinear"),
+        transforms.Resized(keys=["label"], spatial_size=target_size, mode="nearest"),
+    ])(data)
+
+    # ② 转成 (C, D, H, W) 轴序 + 强度窗（label 是整数编号，不做强度变换）
+    data = transforms.Compose([
+        transforms.Transposed(keys=["image", "label"], indices=(0, 3, 2, 1)),
+        transforms.ScaleIntensityRanged(
+            keys=["image"], a_min=-1150, a_max=350, b_min=0.0, b_max=1.0, clip=True,
+        ),
+    ])(data)
+
+    image, label = data["image"], data["label"]
+    organ_ids_before = label.unique()
+
+    # ③ 裁到器官并集的 bbox + 边距
+    coords = torch.nonzero(label[0] > 0, as_tuple=False)
+    if coords.numel() == 0:
+        raise ValueError(f"合并后的 mask 没有任何器官体素: {image_path}")
+    lo = coords.min(dim=0).values
+    hi = coords.max(dim=0).values
+    margin = torch.tensor([EXTEND_D, EXTEND_HW, EXTEND_HW])
+    lo = torch.maximum(lo - margin, torch.zeros(3, dtype=lo.dtype))
+    hi = torch.minimum(
+        hi + margin, torch.tensor(image.shape[1:], dtype=hi.dtype)
+    )
+    image = image[:, lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+    label = label[:, lo[0]:hi[0], lo[1]:hi[1], lo[2]:hi[2]]
+    # 与 fvlm/preprocess.py 相同的完整性检查：裁剪不能把某个器官整个切掉
+    assert torch.all(organ_ids_before == label.unique()), f"裁剪丢失器官: {image_path}"
+
+    # ④ 补零到至少 CROP_SIZE（只往大补，不往小裁）
+    data = transforms.Compose([
+        transforms.SpatialPadd(keys=["image"], spatial_size=CROP_SIZE,
+                               mode="constant", constant_values=0),
+        transforms.SpatialPadd(keys=["label"], spatial_size=CROP_SIZE,
+                               mode="constant", constant_values=0),
+    ])({"image": image, "label": label})
+
+    return data["image"], data["label"]
+#---Dan---

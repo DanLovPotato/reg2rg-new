@@ -55,7 +55,7 @@ class CrossModalKnowledgeEnhancer(nn.Module):
         K = linear(report_vectors)          ← 报告特征作为 Key
         V = linear(report_vectors)          ← 报告特征作为 Value
         out = softmax(Q·Kᵀ / √d_head) · V
-        output = LayerNorm(Q_residual + out) → fc1
+        output = visual_tokens + gamma * fc1(GELU(LayerNorm(Q_residual + out)))
 
     Args:
         d_model  (int): 视觉 Token 的特征维度（Cross-Attention 的工作维度）
@@ -83,6 +83,13 @@ class CrossModalKnowledgeEnhancer(nn.Module):
         # ── 后处理：残差归一化 + 非线性增强 ──
         self.norm = nn.LayerNorm(d_model)
         self.fc1  = nn.Linear(d_model, d_model)
+
+        # LayerScale 门控（逐维可学习，零初始化）。LayerNorm 的输出范数固定在
+        # √d_model ≈ 64 量级，而 local feature 的范数只有 2~3，不加门控的话知识
+        # 增强量会比原特征大一个数量级，恒等残差形同虚设。零初始化让训练从
+        # F = visual_tokens 精确起步，模型再自行决定每一维要放多少知识进来；
+        # 若某器官的报告向量无区分度，梯度会把对应的 gamma 留在 0 附近。
+        self.gamma = nn.Parameter(torch.zeros(d_model))
 
     def forward(self, visual_tokens, organ_report_vectors):
         """
@@ -130,7 +137,7 @@ class CrossModalKnowledgeEnhancer(nn.Module):
             K [B, H, d_head, num_reports] ← report_tokens（已转置）
             V [B, H, num_reports, d_head] ← report_tokens
             Attn = softmax(Q·K / √d_head) · V
-            out  = LayerNorm(Q_residual + Attn) → fc1
+            out  = visual_tokens + gamma * fc1(GELU(LayerNorm(Q_residual + Attn)))
 
         Args:
             visual_tokens (Tensor): 视觉特征，形状 [B, visual_len, d_model]
@@ -166,7 +173,10 @@ class CrossModalKnowledgeEnhancer(nn.Module):
         out = torch.matmul(attn, value)                        # [B, num_heads, visual_len, d_head]
         out = out.permute(0, 2, 1, 3).contiguous().view(batch_size, -1, self.d_model)
         out = self.norm(res_query + out)                       # 残差 + LayerNorm
-        out = self.fc1(F.gelu(out))                           # GELU 非线性 + 线性增强
+        # 外层残差：attn @ value 是报告向量的凸组合，本身不含视觉信息，
+        # 所以 fc1 只产出知识增强量，原始 local feature 走恒等通路保留下来；
+        # gamma 逐维控制注入强度，零初始化时 out == visual_tokens。
+        out = visual_tokens + self.gamma * self.fc1(F.gelu(out))
         return out  # [B, visual_len, d_model]
 
 

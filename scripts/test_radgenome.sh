@@ -20,6 +20,15 @@ source "../configs/${script_name}/${config_file}.sh"
 export PYTHONPATH="$(cd .. && pwd)/.python_packages${PYTHONPATH:+:$PYTHONPATH}"
 
 python_bin="${python_bin:-python}"
+
+# fVLM 必填：训练带了 organ branch，推理不带会导致 strict load 失败
+for required_var in pretrained_finegrained_visual_encoder; do
+    if [ -z "${!required_var:-}" ]; then
+        echo "Error: ${required_var} is not set in configs/${script_name}/${config_file}.sh" >&2
+        exit 1
+    fi
+done
+
 optional_args=()
 if [ -n "${bank_npy_path:-}" ]; then
     optional_args+=(--bank_npy_path "$bank_npy_path")
@@ -36,6 +45,7 @@ CUDA_VISIBLE_DEVICES=$cuda_devices "$python_bin" ../src/${script_name}.py \
     --lang_encoder_path "$lang_encoder_path" \
     --tokenizer_path "$tokenizer_path" \
     --pretrained_visual_encoder "$pretrained_visual_encoder" \
+    --pretrained_finegrained_visual_encoder "$pretrained_finegrained_visual_encoder" \
     --pretrained_adapter "$pretrained_adapter" \
     --ckpt_path "$ckpt_path" \
     --data_folder "$data_folder" \

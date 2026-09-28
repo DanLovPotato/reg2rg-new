@@ -249,7 +249,6 @@ def main():
         #---Dan---
         use_fvlm=model_args.pretrained_finegrained_visual_encoder is not None,
         # Canonical fVLM processed data; do not derive it from Reg2RG's raw-data root.
-        fvlm_processed_root=data_args.fvlm_processed_root,
         #---Dan---
     )
    

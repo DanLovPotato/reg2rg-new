@@ -12,7 +12,12 @@ import tqdm
 from torch.utils.data import Dataset
 import monai.transforms as transforms
 #---Dan---
-from Model.fvlm_vit.preprocess import FVLM_ORGAN_MASK_ID, center_crop_like_fvlm_eval
+from Model.fvlm_vit.preprocess import (
+    FVLM_MASK_SOURCE_ORGANS,
+    FVLM_ORGAN_MASK_ID,
+    build_fvlm_volume,
+    center_crop_like_fvlm_eval,
+)
 #---Dan---
 
 REGIONS = [
@@ -48,7 +53,7 @@ class RadGenomeDataset_Train(Dataset):
     #---Dan---
     def __init__(self, text_tokenizer, image_padding_tokens, region_padding_tokens,
                  data_folder, mask_folder, csv_file, cache_dir=None, max_seq=2048,
-                 voc_size=32000, use_fvlm=False, fvlm_processed_root=None):
+                 voc_size=32000, use_fvlm=False):
     #---Dan---
         self.tokenizer = text_tokenizer
         self.image_padding_tokens = image_padding_tokens
@@ -59,31 +64,15 @@ class RadGenomeDataset_Train(Dataset):
         self.voc_size = voc_size
         #---Dan---
         self.use_fvlm = use_fvlm
-        # Keep fVLM crop inputs on the canonical 9-label processed-mask convention
-        # used by fvlm/finetune.py and fvlm/eval_finetune.py.  This is deliberately
-        # independent of Reg2RG's raw CT / per-region-mask data_folder.
-        self.fvlm_processed_root = fvlm_processed_root
-        #---Dan---
 
-        #---Dan---
+        # fVLM 分支的输入在这里从 RadGenome 原始数据在线生成，不再依赖预先跑一遍
+        # fvlm/preprocess.py 产出的 processed_{split}_{images,masks}。
+        # build_fvlm_volume() 逐条复刻了那个离线流水线，产物已核对为逐比特一致。
         if self.use_fvlm:
-            # Do not infer this from data_folder: smoke datasets can contain a
-            # different 10-label merged-mask encoding (lung/pleura gets overwritten).
-            if not self.fvlm_processed_root:
-                raise ValueError(
-                    "fvlm_processed_root is required when use_fvlm=True; it must "
-                    "point to the canonical fVLM processed-data root with the "
-                    "9-label mask convention."
-                )
-            split = "train" if os.path.basename(data_folder).startswith("train") else "valid"
-            # Canonical root supplies the fVLM image and merged mask consumed below.
-            self.fvlm_image_folder = os.path.join(self.fvlm_processed_root, f"processed_{split}_images")
-            self.fvlm_mask_folder = os.path.join(self.fvlm_processed_root, f"processed_{split}_masks")
-            if not os.path.isdir(self.fvlm_image_folder) or not os.path.isdir(self.fvlm_mask_folder):
-                raise FileNotFoundError("fVLM processed image/mask folders are required for exact eval parity")
-            self.fvlm_loader = transforms.Compose([
-                transforms.LoadImaged(keys=["image", "label"], image_only=True, ensure_channel_first=True),
-            ])
+            self.fvlm_image_loader = transforms.LoadImaged(
+                keys=["image"], image_only=True, ensure_channel_first=True)
+            self.fvlm_label_loader = transforms.LoadImaged(
+                keys=["label"], image_only=True, ensure_channel_first=True)
         #---Dan---
 
         self.accession_to_sentences = self.load_accession_sentences(csv_file)
@@ -172,13 +161,22 @@ class RadGenomeDataset_Train(Dataset):
         img_data = nib.load(img_path).get_fdata()
         #---Dan---
         if self.use_fvlm:
-            file_name = os.path.basename(img_path)
-            fvlm_data = self.fvlm_loader({
-                "image": os.path.join(self.fvlm_image_folder, file_name),
-                "label": os.path.join(self.fvlm_mask_folder, file_name),
-            })
-            fvlm_image = fvlm_data["image"].as_tensor()
-            fvlm_mask = fvlm_data["label"].as_tensor()
+            # 与 fvlm/preprocess.py 保持一致：按 seg_{sample_id}/ 目录下实际存在的
+            # 9 个器官 mask 来合并。不能用 mask_paths —— 它被 prepare_samples 过滤过，
+            # 只含报告里出现的器官（thyroid/breast 有 96% 的样本会缺），合并结果会不同。
+            sample_id = os.path.basename(img_path)[:-len(".nii.gz")]
+            mask_dir = os.path.join(self.mask_folder, f"seg_{sample_id}")
+            fvlm_mask_paths = {
+                organ: os.path.join(mask_dir, f"{organ}.nii.gz")
+                for organ in FVLM_MASK_SOURCE_ORGANS
+                if os.path.exists(os.path.join(mask_dir, f"{organ}.nii.gz"))
+            }
+            fvlm_image, fvlm_mask = build_fvlm_volume(
+                img_path, fvlm_mask_paths,
+                self.fvlm_image_loader, self.fvlm_label_loader,
+            )
+            fvlm_image = fvlm_image.as_tensor()
+            fvlm_mask = fvlm_mask.as_tensor()
         #---Dan---
 
         mask_img_tensors = {}
@@ -208,8 +206,14 @@ class RadGenomeDataset_Train(Dataset):
 
             #---Dan---
             if self.use_fvlm:
+                fvlm_organ_mask = fvlm_mask.eq(FVLM_ORGAN_MASK_ID[key])
+                if not torch.any(fvlm_organ_mask):
+                    # fVLM's processed mask disagrees with the RadGenome mask for this
+                    # organ (empty here despite RadGenome having voxels) - drop the organ
+                    # for this sample rather than crash the run.
+                    continue
                 crop, crop_mask = center_crop_like_fvlm_eval(
-                    fvlm_image, fvlm_mask.eq(FVLM_ORGAN_MASK_ID[key]),
+                    fvlm_image, fvlm_organ_mask,
                     return_mask=True, mask_value=FVLM_ORGAN_MASK_ID[key],
                 )
                 mask_img_tensors[key] = crop.unsqueeze(0)

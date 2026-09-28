@@ -23,11 +23,6 @@ class ModelArguments:
 class DataArguments:
     data_folder: Optional[str] = field(default='/data/chenzhixuan/data/RadGenome-ChestCT/dataset/valid_preprocessed')
     mask_folder: Optional[str] = field(default='/data/chenzhixuan/data/RadGenome-ChestCT/dataset/valid_region_mask')
-    # Separate from data_folder so fVLM always sees its canonical 9-label masks.
-    fvlm_processed_root: Optional[str] = field(
-        default=None,
-        metadata={"help": "Canonical fVLM data root containing processed_{train,valid}_{images,masks}; required when fVLM is enabled."},
-    )
     report_file: Optional[str] = field(default='/data/chenzhixuan/data/RadGenome-ChestCT/dataset/radgenome_files/validation_region_report.csv')
     monai_cache_dir: Optional[str] = field(default='/jhcnas5/chenzhixuan/data/RadGenome-ChestCT/cache')
     bank_npy_path: Optional[str] = field(default=None)
