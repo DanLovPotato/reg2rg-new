@@ -248,7 +248,6 @@ def main():
         cache_dir=data_args.monai_cache_dir,
         #---Dan---
         use_fvlm=model_args.pretrained_finegrained_visual_encoder is not None,
-        # Canonical fVLM processed data; do not derive it from Reg2RG's raw-data root.
         #---Dan---
     )
    
