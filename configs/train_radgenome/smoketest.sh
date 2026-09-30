@@ -8,7 +8,7 @@ experiment_name="Reg2RG_9_24"
 bf16=True
 
 # Device settings — EDIT to match the server (run `nvidia-smi` there first)
-cuda_devices="3"
+cuda_devices="0,1,2"
 
 # Torchrun settings
 master_port=25370

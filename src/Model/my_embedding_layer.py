@@ -143,6 +143,19 @@ class MyEmbedding(nn.Module):
             # Not an fVLM module: this is only the bridge from exact, 256-D
             # fVLM feature space to the existing 4096-D Reg2RG token interface.
             self.fvlm_to_llm = nn.Linear(256, embedding_dim)
+
+            # fVLM 的图像分支每器官只输出 1 个 256-D 向量（对比学习的设计），而
+            # Reg2RG 的接口是每器官 perceiver_num + 1 个 token。之前用 expand 把
+            # 那一个向量复制 perceiver_num 份填满槽位，33 个 token 里只有 2 个不同，
+            # 区域表征的容量是原版 Perceiver 路径的 1/32。
+            #
+            # 这里改成：token 0 仍走冻结的 fVLM pooling 头（逐比特不变，且是唯一
+            # 落在 fVLM 图文对齐空间里的 token，RWLKE 用它当 query），其余
+            # perceiver_num - 1 个由一个新的 Perceiver 从 pooling 之前的多尺度
+            # patch 特征重采样得到，补上缺失的空间细节。
+            self.region_perceiver = PerceiverResampler(
+                dim=vis_dim, num_latents=perceiver_num - 1)
+            self.region_to_llm = nn.Linear(vis_dim, embedding_dim)
         #---Dan---
  
         self.mask_encoder = ViT(
@@ -441,15 +454,28 @@ class MyEmbedding(nn.Module):
                 # This 256-D feature is exactly fVLM's image branch output:
                 # ViT -> multi-scale masked query attention -> organ projection
                 # -> L2 normalization.  Only the adapter afterwards is Reg2RG-specific.
-                fvlm_feature = self.finegrain_clip_vision_encoder(
-                    vision_temp, fvlm_mask, area,
+                # patches 是同一次 ViT 前向里 pooling 之前的多尺度 patch 特征，
+                # 每样本 [N_i, vis_dim]，N_i 随器官覆盖的 patch 数变化。
+                fvlm_feature, patches = (
+                    self.finegrain_clip_vision_encoder.forward_with_patches(
+                        vision_temp, fvlm_mask, area,
+                    )
                 )
-                region_embeddings[area] = self.fvlm_to_llm(fvlm_feature)
+                # token 0：冻结的 fVLM 器官向量，落在图文对齐空间里
+                fvlm_token = rearrange(
+                    self.fvlm_to_llm(fvlm_feature), "(b s) d -> b s 1 d", b=B, s=S
+                )
+                # token 1..n：Perceiver 把变长的 patch 特征重采样成固定条数。
+                # N_i 各不相同，逐样本跑（batch 维在上游已经展平成 (b s)）。
+                resampled = torch.stack([
+                    self.region_perceiver(p[None, None, None])[0, 0]
+                    for p in patches
+                ], dim=0)
+                resampled = rearrange(
+                    self.region_to_llm(resampled), "(b s) n d -> b s n d", b=B, s=S
+                )
                 region_embeddings[area] = rearrange(
-                    region_embeddings[area], "(b s) d -> b s 1 d", b=B, s=S
-                ).expand(-1, -1, self.region_token_len - 1, -1)
-                region_embeddings[area] = rearrange(
-                    region_embeddings[area], "b s n d -> b (s n) d"
+                    torch.cat([fvlm_token, resampled], dim=2), "b s n d -> b (s n) d"
                 )
 
                 mask_embedding, _ = self.mask_encoder(mask_x[area])

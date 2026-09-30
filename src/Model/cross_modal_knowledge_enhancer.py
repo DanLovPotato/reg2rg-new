@@ -179,6 +179,14 @@ class CrossModalKnowledgeEnhancer(nn.Module):
         out = visual_tokens + self.gamma * self.fc1(F.gelu(out))
         return out  # [B, visual_len, d_model]
 
+    def knowledge_delta(self, visual_tokens, report_tokens):
+        """只返回知识增量 ``gamma ⊙ fc1(...)``，不含恒等残差。
+
+        供 RWLKE 用：query 只取对齐空间里的 token 0，算出的增量再广播回该器官
+        的全部 token。零初始化时返回全零，等价于不注入。
+        """
+        return self._cross_attend(visual_tokens, report_tokens) - visual_tokens
+
 
 # =====================================================================
 # 模块 2：区域级局部知识增强管理器 (RWLKE - Region-Wise Local Knowledge Enhancer)
@@ -263,10 +271,18 @@ class RegionWiseLocalKnowledgeEnhancer(nn.Module):
                 selected = vectors.to(device=organ_tokens.device,
                                       dtype=organ_tokens.dtype).unsqueeze(0)
 
-                # 用该器官专属增强器做 Cross-Attention，原位写回
-                enhanced[i:i + 1, start:end, :] = self.enhancers[organ]._cross_attend(
-                    organ_tokens, selected
+                # Cross-Attention 的 query 只取 token 0。这一步是整个模型里唯一
+                # 把视觉和文本直接做点积的地方，点积要有语义，两侧就得落在可比的
+                # 空间里 —— 而 token 0 是 fVLM 冻结 pooling 头的输出，和报告向量
+                # 同属 fVLM 对比学习的对齐空间；token 1.. 来自 Perceiver 重采样的
+                # ViT patch 特征，从未与文本对齐，拿它们当 query 选出的"最相关
+                # 报告"没有依据。附带好处是注意力只算一次而不是 region_token_len 次。
+                delta = self.enhancers[organ].knowledge_delta(
+                    organ_tokens[:, :1], selected
                 )
+                # 知识增量广播回该器官的全部 token：下游的 LLM 和 GKE 读的是整段，
+                # 只增强 token 0 的话知识只覆盖 1/region_token_len。
+                enhanced[i:i + 1, start:end, :] = organ_tokens + delta
                 touched_organs.add(organ)
 
         # ---Dan---

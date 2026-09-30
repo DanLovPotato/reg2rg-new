@@ -72,6 +72,21 @@ class FVLMOrganEncoder(nn.Module):
         ``masks`` is the canonical fVLM crop mask (values use
         ``FVLM_ORGAN_MASK_ID``), aligned exactly with ``images``.
         """
+        pooled, _ = self.forward_with_patches(images, masks, organ_name)
+        return pooled
+
+    def forward_with_patches(self, images, masks, organ_name):
+        """Same pooled feature as ``forward``, plus the organ's raw patch tokens.
+
+        Returns ``(pooled, patches)``:
+          * ``pooled``  [batch, 256] —— 与 ``forward`` 逐比特相同，仍是冻结的
+            query-token attention pooling + 器官专属投影的输出。
+          * ``patches`` 长度为 batch 的 list，每项 [N_i, 768]，N_i 随器官覆盖的
+            patch 数变化（lung ~1040，breast ~16）。这是 pooling 之前的多尺度
+            patch 特征，供上游的 Perceiver 重采样成多个 token 用。
+
+        ViT 只前向一次，两个返回值共用同一份特征。
+        """
         if organ_name not in self.organ_to_index:
             raise KeyError(f"Unknown fVLM organ: {organ_name!r}")
         organ_id = self.organ_to_index[organ_name]
@@ -88,11 +103,13 @@ class FVLMOrganEncoder(nn.Module):
 
         query = self.query_tokens[organ_id].view(1, 1, -1)
         features = []
+        patches = []
         for sample_index, tokens in enumerate(token_mask):
             key_value = torch.cat(
                 [level[sample_index, tokens] for level in hidden_image_embeds], dim=0,
             ).unsqueeze(0)
+            patches.append(key_value.squeeze(0))
             pooled, _ = self.attention(query, key_value, key_value)
             features.append(pooled.squeeze(0))
         pooled = torch.cat(features, dim=0)
-        return F.normalize(self.vision_projs[organ_id](pooled), dim=-1)
+        return F.normalize(self.vision_projs[organ_id](pooled), dim=-1), patches

@@ -42,13 +42,19 @@ class Reg2RG(nn.Module):
             self.image_padding_tokens.append(image_padding_token)
  
         self.region_padding_tokens = []
+        # 每个器官占 image_num + 1 个 token（perceiver 的 image_num 个 + 1 个 mask），
+        # 所以编号的步长必须是 image_num + 1。原来用 image_num 当步长，相邻器官的
+        # 区间首尾重叠一个，<region32>/<region64>/... 共 9 个编号被两个器官共用，
+        # 总共只注册了 321 个而不是 330 个；radgenome_dataset_test.py 那边用的是
+        # i * region_num + j（步长 33），两边本来就对不上。
+        region_stride = image_num + 1
         for i in range(max_region_size):
             region_padding_tokens = ""
-            for j in range(image_num+1):
-                region_token = "<region"+str(i*image_num+j)+">"
+            for j in range(region_stride):
+                region_token = "<region"+str(i*region_stride+j)+">"
                 region_padding_tokens = region_padding_tokens + region_token
                 special_token["additional_special_tokens"].append(
-                    "<region"+str(i*image_num+j)+">")
+                    "<region"+str(i*region_stride+j)+">")
             self.region_padding_tokens.append(region_padding_tokens)
  
         self.text_tokenizer.add_special_tokens(
