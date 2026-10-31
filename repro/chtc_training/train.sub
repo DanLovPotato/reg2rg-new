@@ -1,0 +1,26 @@
+universe = vanilla
+executable = run_full.sh
+arguments = $(Cluster).$(Process)
+should_transfer_files = YES
+when_to_transfer_output = ON_EXIT
+transfer_input_files = code.tar.gz,prepare_smoke.py,verify_smoke.py,prepare_full.py,train_entry.py,/home/txu98/radgenome_first500_companion/radgenome_first500_masks_reports.tar
+transfer_output_files = ""
+request_gpus = 2
+gpus_minimum_memory = 80000MB
+request_cpus = 12
+request_memory = 160GB
+request_disk = 1500GB
+requirements = (Target.HasCHTCStaging == true) && (Target.GPUs_Capability >= 8.0) && (Target.GPUs_Capability <= 8.9)
++WantGPULab = true
++GPUJobLength = "long"
++JobBatchName = "Reg2RG-directGCN-10organ-2GPU-full-20260921"
+on_exit_remove = (ExitBySignal == false) && (ExitCode == 0)
+on_exit_hold = (ExitBySignal == true) || ((ExitCode != 0) && (ExitCode != 85))
+periodic_hold = (NumJobStarts > 4)
+periodic_hold_reason = "More than four starts; inspect checkpoints before continuing"
+output = train.$(Cluster).out
+error = train.$(Cluster).err
+log = train.$(Cluster).log
+stream_output = True
+stream_error = True
+queue 1

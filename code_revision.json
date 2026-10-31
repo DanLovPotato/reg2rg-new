@@ -1,0 +1,9 @@
+{
+  "base_branch": "feature/direct-gcn-fusion-20260916",
+  "base_commit": "2f75ae67073343ec954b4de9c9242d8c2ecbe75d",
+  "local_patch": "non_reentrant_llama_checkpointing_v1_20260922",
+  "changed_model_files": ["src/Model/Reg2RG.py", "src/Model/checkpoint_compat.py"],
+  "regression_test": "tests/test_checkpoint_compat.py",
+  "regression_result": "PASS on CHTC torch 2.0.1 / transformers 4.28.1 / peft 0.7.1; gradient hooks 2 -> 1; loss and all gradients match no-checkpoint baseline",
+  "preserved": ["Full/Mask architecture", "full_loss + 0.8 * mask_loss", "RWLKE shared region gradient flow", "LIFT/GCN", "ZeRO stage 2", "initialization from Llama/RadFM"]
+}

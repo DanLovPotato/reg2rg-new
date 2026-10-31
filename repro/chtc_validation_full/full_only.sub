@@ -1,0 +1,22 @@
+universe = vanilla
+executable = run.sh
+should_transfer_files = YES
+when_to_transfer_output = ON_EXIT
+transfer_input_files = code.tar.gz,full_entry.py
+transfer_output_files = ""
+environment = "VALIDATION_OUTPUT_ROOT=/staging/t/txu98/reg2rg_validation_15070_10organs_fullonly_20260930 VALIDATION_ENTRY=full_entry.py"
+request_gpus = 1
+gpus_minimum_memory = 80000MB
+request_cpus = 8
+request_memory = 128GB
+request_disk = 180GB
+requirements = (Target.HasCHTCStaging == true) && (Target.GPUs_Capability <= 8.9)
++WantGPULab = true
++GPUJobLength = "long"
++JobBatchName = "Reg2RG-15070-validation-FULLONLY-20260930"
+output = inference.$(Cluster).out
+error = inference.$(Cluster).err
+log = inference.$(Cluster).log
+stream_output = True
+stream_error = True
+queue 1
