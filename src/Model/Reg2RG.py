@@ -37,13 +37,14 @@ class Reg2RG(nn.Module):
             self.image_padding_tokens.append(image_padding_token)
  
         self.region_padding_tokens = []
+        region_num = image_num + 1
         for i in range(max_region_size):
             region_padding_tokens = ""
-            for j in range(image_num+1):
-                region_token = "<region"+str(i*image_num+j)+">"
+            for j in range(region_num):
+                region_token = "<region"+str(i*region_num+j)+">"
                 region_padding_tokens = region_padding_tokens + region_token
                 special_token["additional_special_tokens"].append(
-                    "<region"+str(i*image_num+j)+">")
+                    "<region"+str(i*region_num+j)+">")
             self.region_padding_tokens.append(region_padding_tokens)
  
         self.text_tokenizer.add_special_tokens(
